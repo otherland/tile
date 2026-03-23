@@ -208,8 +208,8 @@ class TestCreate(TileTestCase):
         issue_id = self.create_issue("Timestamp test")
         issue = self.get_issue(issue_id)
         # Should be valid ISO 8601
-        created = datetime.fromisoformat(issue["created_at"])
-        updated = datetime.fromisoformat(issue["updated_at"])
+        created = datetime.fromisoformat(issue["created_at"].replace("Z", "+00:00"))
+        updated = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
         self.assertAlmostEqual(
             created.timestamp(), updated.timestamp(), delta=2
         )
