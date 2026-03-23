@@ -1222,9 +1222,10 @@ class Formatter:
         lines = []
         stats = data["stats"]
         lines.append(f"=== tile dashboard ===")
-        lines.append(f"Total: {stats['total']}  Open: {self._c('\033[32m', stats['open'])}  "
-                      f"In Progress: {self._c('\033[36m', stats['in_progress'])}  "
-                      f"Closed: {self._c('\033[2m', stats['closed'])}")
+        green, cyan, dim = "\033[32m", "\033[36m", "\033[2m"
+        lines.append(f"Total: {stats['total']}  Open: {self._c(green, stats['open'])}  "
+                      f"In Progress: {self._c(cyan, stats['in_progress'])}  "
+                      f"Closed: {self._c(dim, stats['closed'])}")
         if data["stale_count"]:
             lines.append(f"Stale (30d+): {data['stale_count']}")
         lines.append("")
@@ -1275,7 +1276,8 @@ class Formatter:
     def format_doctor(self, checks):
         lines = []
         for c in checks:
-            icon = self._c("\033[32m", "✓") if c["ok"] else self._c("\033[31m", "✗")
+            green, red = "\033[32m", "\033[31m"
+            icon = self._c(green, "✓") if c["ok"] else self._c(red, "✗")
             line = f"  {icon} {c['check']}"
             if c.get("detail"):
                 line += f" — {c['detail']}"
