@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/otherland/tile/actions/workflows/test.yml"><img src="https://github.com/otherland/tile/actions/workflows/test.yml/badge.svg" alt="tests"></a>
   <a href="https://pypi.org/project/tile-cli/"><img src="https://img.shields.io/pypi/v/tile-cli" alt="PyPI"></a>
-  <a href="https://pypi.org/project/tile-cli/"><img src="https://img.shields.io/pypi/pyversions/tile-cli" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
 
 <p align="center">
