@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="hero.jpg" alt="tile — before and after" width="700">
+</p>
+
 <h1 align="center">tile</h1>
 
 <p align="center">
