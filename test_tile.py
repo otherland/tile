@@ -342,6 +342,47 @@ class TestUpdate(TileTestCase):
         self.assertEqual(issue["status"], "in_progress")
 
 
+class TestClaim(TileTestCase):
+
+    def test_claim_open_issue(self):
+        """claim sets status to in_progress."""
+        issue_id = self.create_issue("Claimable")
+        result = self.tile_ok("claim", issue_id)
+        self.assertEqual(result["status"], "in_progress")
+
+    def test_claim_with_assignee(self):
+        """claim --assignee sets the assignee."""
+        issue_id = self.create_issue("Assign me")
+        result = self.tile_ok("claim", issue_id, "--assignee", "AgentAlpha")
+        self.assertEqual(result["status"], "in_progress")
+        self.assertEqual(result["assignee"], "AgentAlpha")
+
+    def test_claim_already_claimed_fails(self):
+        """claim on an in_progress issue fails."""
+        issue_id = self.create_issue("Race condition")
+        self.tile_ok("claim", issue_id, "--assignee", "Agent1")
+        err = self.tile_fail("claim", issue_id)
+        self.assertIn("claimed", err.lower())
+
+    def test_claim_already_claimed_shows_assignee(self):
+        """claim failure message includes who claimed it."""
+        issue_id = self.create_issue("Taken")
+        self.tile_ok("claim", issue_id, "--assignee", "AgentBravo")
+        err = self.tile_fail("claim", issue_id)
+        self.assertIn("AgentBravo", err)
+
+    def test_claim_closed_fails(self):
+        """claim on a closed issue fails."""
+        issue_id = self.create_issue("Done")
+        self.tile_ok("update", issue_id, "--status", "closed")
+        err = self.tile_fail("claim", issue_id)
+        self.assertIn("closed", err.lower())
+
+    def test_claim_not_found(self):
+        """claim on nonexistent ID fails."""
+        self.tile_fail("claim", "tl-000000")
+
+
 class TestDelete(TileTestCase):
 
     def test_delete_removes_issue(self):

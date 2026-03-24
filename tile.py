@@ -9,6 +9,7 @@ import os
 import os.path
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -274,7 +275,61 @@ class Tile:
             vals + [now, issue_id],
         )
         self.conn.commit()
+        self._fire_hook(issue_id, old_status=row["status"],
+                        new_status=updates.get("status", row["status"]))
         return self._issue_dict_full(issue_id)
+
+    def claim(self, issue_id_prefix, assignee=None):
+        """Atomically claim an issue: open -> in_progress. Fails if not open."""
+        issue_id = self._resolve_issue_id(issue_id_prefix)
+        now = _now()
+        updates = {"status": "in_progress", "updated_at": now}
+        sets = "status = 'in_progress', seq = seq + 1, updated_at = ?"
+        params = [now]
+        if assignee:
+            sets += ", assignee = ?"
+            params.append(assignee)
+        cur = self.conn.execute(
+            f"UPDATE issues SET {sets} WHERE id = ? AND status = 'open'",
+            params + [issue_id],
+        )
+        if cur.rowcount == 0:
+            row = self.conn.execute("SELECT status, assignee FROM issues WHERE id=?", (issue_id,)).fetchone()
+            if not row:
+                raise TileError(f"Not found: {issue_id}")
+            if row["status"] == "in_progress":
+                who = f" by {row['assignee']}" if row["assignee"] else ""
+                raise TileError(f"Already claimed{who}")
+            raise TileError(f"Cannot claim: status is {row['status']}")
+        self.conn.commit()
+        self._fire_hook(issue_id, old_status="open", new_status="in_progress")
+        return self._issue_dict_full(issue_id)
+
+    def _fire_hook(self, issue_id, old_status, new_status):
+        """Run .tile/hooks/on-status-change if it exists."""
+        if old_status == new_status:
+            return
+        hook_dir = os.path.join(os.path.dirname(self.db_path), "hooks")
+        hook_path = os.path.join(hook_dir, "on-status-change")
+        if not os.path.isfile(hook_path):
+            return
+        if not os.access(hook_path, os.X_OK):
+            return
+        row = self.conn.execute("SELECT * FROM issues WHERE id=?", (issue_id,)).fetchone()
+        if not row:
+            return
+        env = os.environ.copy()
+        env["TILE_ISSUE_ID"] = issue_id
+        env["TILE_OLD_STATUS"] = old_status
+        env["TILE_NEW_STATUS"] = new_status
+        env["TILE_TITLE"] = row["title"]
+        env["TILE_ASSIGNEE"] = row["assignee"] or ""
+        env["TILE_DB"] = self.db_path
+        try:
+            subprocess.run([hook_path], env=env, timeout=10,
+                           capture_output=True, check=False)
+        except Exception:
+            pass  # Hooks must not break tile
 
     def delete(self, issue_id_prefix):
         issue_id = self._resolve_issue_id(issue_id_prefix)
@@ -1409,6 +1464,11 @@ def build_parser():
     sp = sub.add_parser("delete")
     sp.add_argument("issue_id")
 
+    # claim
+    sp = sub.add_parser("claim")
+    sp.add_argument("issue_id")
+    sp.add_argument("--assignee")
+
     # list
     sp = sub.add_parser("list")
     sp.add_argument("--status")
@@ -1607,6 +1667,14 @@ def _dispatch(args, tile, json_mode, fmt):
             print(json.dumps({"ok": True}))
         elif not getattr(args, "quiet", False):
             print(f"Deleted {args.issue_id}")
+        return 0
+
+    elif cmd == "claim":
+        result = tile.claim(args.issue_id, assignee=args.assignee)
+        if json_mode:
+            print(json.dumps(result, ensure_ascii=False))
+        elif not getattr(args, "quiet", False):
+            print(f"Claimed {result['id']}")
         return 0
 
     elif cmd == "list":
