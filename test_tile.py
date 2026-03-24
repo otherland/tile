@@ -841,80 +841,69 @@ class TestComment(TileTestCase):
 
 class TestPrime(TileTestCase):
 
-    def test_prime_structure(self):
-        """prime returns the expected top-level keys."""
+    def test_prime_claims_top_ready_issue(self):
+        """prime atomically claims the highest-impact ready issue."""
+        issue_id = self.create_issue("Do this")
         result = self.tile_ok("prime")
-        expected_keys = {
-            "in_progress", "ready", "blocked_summary",
-            "recently_closed", "recently_created", "stats", "stale_count",
-        }
-        self.assertEqual(set(result.keys()), expected_keys)
+        self.assertEqual(result["status"], "assigned")
+        self.assertEqual(result["issue"]["id"], issue_id)
+        self.assertEqual(result["issue"]["status"], "in_progress")
 
-    def test_prime_stats(self):
-        """prime stats counts are correct."""
-        self.create_issue("Open 1")
-        self.create_issue("Open 2")
-        ip = self.create_issue("In progress")
-        self.tile_ok("update", ip, "--status", "in_progress")
-        done = self.create_issue("Done")
-        self.tile_ok("update", done, "--status", "closed")
+    def test_prime_with_assignee(self):
+        """prime --assignee sets the assignee on the claimed issue."""
+        self.create_issue("Work item")
+        result = self.tile_ok("prime", "--assignee", "AgentX")
+        self.assertEqual(result["issue"]["assignee"], "AgentX")
 
+    def test_prime_empty(self):
+        """prime on empty workspace returns status=empty."""
         result = self.tile_ok("prime")
-        self.assertEqual(result["stats"]["total"], 4)
-        self.assertEqual(result["stats"]["open"], 2)
-        self.assertEqual(result["stats"]["in_progress"], 1)
-        self.assertEqual(result["stats"]["closed"], 1)
+        self.assertEqual(result["status"], "empty")
 
-    def test_prime_in_progress_complete(self):
-        """prime in_progress contains all in_progress issues."""
-        ids = []
-        for i in range(5):
-            _id = self.create_issue(f"WIP {i}")
-            self.tile_ok("update", _id, "--status", "in_progress")
-            ids.append(_id)
+    def test_prime_all_done(self):
+        """prime when all issues closed returns status=done."""
+        issue_id = self.create_issue("Already done")
+        self.tile_ok("update", issue_id, "--status", "closed")
         result = self.tile_ok("prime")
-        result_ids = {r["id"] for r in result["in_progress"]}
-        self.assertEqual(result_ids, set(ids))
+        self.assertEqual(result["status"], "done")
 
-    def test_prime_ready_capped(self):
-        """prime ready is capped at 10 by default."""
-        for i in range(15):
-            self.create_issue(f"Issue {i}")
+    def test_prime_skips_already_claimed(self):
+        """prime skips in_progress issues and claims the next open one."""
+        a = self.create_issue("Already taken")
+        b = self.create_issue("Available")
+        self.tile_ok("claim", a)
         result = self.tile_ok("prime")
-        self.assertLessEqual(len(result["ready"]), 10)
+        self.assertEqual(result["status"], "assigned")
+        self.assertEqual(result["issue"]["id"], b)
 
-    def test_prime_ready_limit_override(self):
-        """prime --limit overrides the ready cap."""
-        for i in range(15):
-            self.create_issue(f"Issue {i}")
-        result = self.tile_ok("prime", "--limit", "5")
-        self.assertLessEqual(len(result["ready"]), 5)
-
-    def test_prime_recently_created(self):
-        """prime recently_created includes issues from last 24h."""
-        issue_id = self.create_issue("Brand new")
+    def test_prime_respects_impact_order(self):
+        """prime claims the highest-impact issue first."""
+        low = self.create_issue("Low impact")
+        high = self.create_issue("High impact")
+        dep = self.create_issue("Blocked by high")
+        self.tile_ok("dep", "add", dep, high)
         result = self.tile_ok("prime")
-        ids = {r["id"] for r in result["recently_created"]}
-        self.assertIn(issue_id, ids)
+        self.assertEqual(result["issue"]["id"], high)
 
-    def test_prime_blocked_summary(self):
-        """prime blocked_summary has count and top_blockers."""
-        a = self.create_issue("Blocker")
-        b = self.create_issue("Blocked")
-        self.tile_ok("dep", "add", b, a)
-
-        result = self.tile_ok("prime")
-        self.assertEqual(result["blocked_summary"]["count"], 1)
-        blocker_ids = {
-            r["id"] for r in result["blocked_summary"]["top_blockers"]
-        }
-        self.assertIn(a, blocker_ids)
+    def test_prime_watch_returns_dashboard(self):
+        """prime --watch returns dashboard structure without claiming."""
+        self.create_issue("Unclaimed")
+        result = self.tile_ok("prime", "--watch")
+        self.assertIn("stats", result)
+        self.assertIn("ready", result)
+        # Issue should still be open
+        issues = self.tile_ok("list")
+        self.assertEqual(issues[0]["status"], "open")
 
     def test_bare_tile_runs_prime(self):
         """Running tile with no subcommand is equivalent to tile prime."""
+        self.create_issue("Something")
         prime_result = self.tile_ok("prime")
-        bare_result = self.tile_ok()  # no subcommand
-        self.assertEqual(prime_result, bare_result)
+        # Reset and try bare
+        self.setUp()
+        self.create_issue("Something")
+        bare_result = self.tile_ok()
+        self.assertEqual(prime_result["status"], bare_result["status"])
 
 
 # ===========================================================================

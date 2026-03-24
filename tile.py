@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import tempfile
 import textwrap
 from collections import defaultdict
@@ -465,20 +466,54 @@ class Tile:
             impact[rid] = len(visited & open_ids)
         return impact
 
-    def prime(self, limit=10, hours=24):
-        now = datetime.now(timezone.utc)
-        cutoff = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        stale_cutoff = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def prime(self, assignee=None, poll_interval=5, watch=False):
+        """Agent entry point. Atomically claim the next ready issue.
 
-        # In progress
+        If watch=True: show dashboard and return (human-readable overview).
+        Otherwise: claim top ready issue and return it. If nothing is ready
+        but open work exists, poll every poll_interval seconds until something
+        unblocks. If all work is closed, return done signal.
+        """
+        if watch:
+            return self._prime_dashboard()
+
+        while True:
+            total = self.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+            if total == 0:
+                return {"status": "empty"}
+
+            closed = self.conn.execute(
+                "SELECT COUNT(*) FROM issues WHERE status='closed'"
+            ).fetchone()[0]
+            if closed == total:
+                return {"status": "done"}
+
+            ready = self.list_issues(ready=True)
+            # Filter to only truly open (not already in_progress)
+            ready = [i for i in ready if i["status"] == "open"]
+
+            for issue in ready:
+                try:
+                    claimed = self.claim(issue["id"], assignee=assignee)
+                    return {"status": "assigned", "issue": claimed}
+                except TileError:
+                    continue  # Another agent got there first — try next
+
+            # Nothing claimable — wait for deps to unlock
+            time.sleep(poll_interval)
+            # Re-open the connection to see writes from other processes
+            self.conn.close()
+            self.conn = _connect(self.db_path)
+
+    def _prime_dashboard(self):
+        """Human-readable dashboard (called by prime --watch)."""
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        stale_cutoff = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         in_progress = [self._issue_dict(r) for r in self.conn.execute(
             "SELECT * FROM issues WHERE status='in_progress'"
         )]
-
-        # Ready (with impact)
-        ready = self.list_issues(ready=True)[:limit]
-
-        # Blocked
+        ready = self.list_issues(ready=True)[:10]
         blocked_rows = self.conn.execute(
             "SELECT DISTINCT child_id FROM dependencies d "
             "JOIN issues p ON d.parent_id = p.id "
@@ -486,8 +521,6 @@ class Tile:
             "WHERE p.status != 'closed' AND c.status != 'closed'"
         ).fetchall()
         blocked_count = len(blocked_rows)
-
-        # Top blockers: open issues that transitively block the most others
         adj = defaultdict(set)
         for r in self.conn.execute("SELECT parent_id, child_id FROM dependencies"):
             adj[r["parent_id"]].add(r["child_id"])
@@ -498,8 +531,7 @@ class Tile:
         for pid in open_ids:
             if pid not in adj:
                 continue
-            visited = set()
-            queue = list(adj[pid])
+            visited, queue = set(), list(adj[pid])
             while queue:
                 node = queue.pop()
                 if node in visited:
@@ -516,42 +548,24 @@ class Tile:
             d = self._issue_dict_full(bid)
             d["impact"] = blocker_impact[bid]
             top_blockers.append(d)
-
-        # Recently closed/created
-        recently_closed = [self._issue_dict(r) for r in self.conn.execute(
-            "SELECT * FROM issues WHERE status='closed' AND closed_at >= ?", (cutoff,)
-        )]
         recently_created = [self._issue_dict(r) for r in self.conn.execute(
             "SELECT * FROM issues WHERE created_at >= ?", (cutoff,)
         )]
-
-        # Stats
         total = self.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
         open_count = self.conn.execute("SELECT COUNT(*) FROM issues WHERE status='open'").fetchone()[0]
         ip_count = self.conn.execute("SELECT COUNT(*) FROM issues WHERE status='in_progress'").fetchone()[0]
         closed_count = self.conn.execute("SELECT COUNT(*) FROM issues WHERE status='closed'").fetchone()[0]
-
-        # Stale count
         stale_count = self.conn.execute(
             "SELECT COUNT(*) FROM issues WHERE status != 'closed' AND updated_at < ?",
             (stale_cutoff,)
         ).fetchone()[0]
-
         return {
             "in_progress": in_progress,
             "ready": ready,
-            "blocked_summary": {
-                "count": blocked_count,
-                "top_blockers": top_blockers,
-            },
-            "recently_closed": recently_closed,
+            "blocked_summary": {"count": blocked_count, "top_blockers": top_blockers},
             "recently_created": recently_created,
-            "stats": {
-                "total": total,
-                "open": open_count,
-                "in_progress": ip_count,
-                "closed": closed_count,
-            },
+            "stats": {"total": total, "open": open_count,
+                      "in_progress": ip_count, "closed": closed_count},
             "stale_count": stale_count,
         }
 
@@ -1274,47 +1288,58 @@ class Formatter:
         return "\n".join(lines)
 
     def format_prime(self, data):
+        status = data.get("status")
+
+        # Agent assignment result
+        if status == "assigned":
+            i = data["issue"]
+            green = "\033[32m"
+            lines = [
+                self._c(green, f"=== assigned: {i['id']} ==="),
+                f"{i['title']}",
+            ]
+            if i.get("description"):
+                lines.append(i["description"])
+            if i.get("labels"):
+                lines.append(f"labels: {', '.join(i['labels'])}")
+            lines.append(f"priority: {i['priority']}")
+            return "\n".join(lines)
+
+        if status == "done":
+            return self._c("\033[32m", "All done. No open issues remaining.")
+
+        if status == "empty":
+            return "No issues found."
+
+        # Dashboard (--watch)
         lines = []
         stats = data["stats"]
-        lines.append(f"=== tile dashboard ===")
+        lines.append(f"=== tile ===")
         green, cyan, dim = "\033[32m", "\033[36m", "\033[2m"
         lines.append(f"Total: {stats['total']}  Open: {self._c(green, stats['open'])}  "
                       f"In Progress: {self._c(cyan, stats['in_progress'])}  "
                       f"Closed: {self._c(dim, stats['closed'])}")
-        if data["stale_count"]:
+        if data.get("stale_count"):
             lines.append(f"Stale (30d+): {data['stale_count']}")
         lines.append("")
-
-        if data["in_progress"]:
+        if data.get("in_progress"):
             lines.append("--- In Progress ---")
             lines.append(self.format_list(data["in_progress"]))
             lines.append("")
-
-        if data["ready"]:
-            lines.append("--- Ready (top) ---")
+        if data.get("ready"):
+            lines.append("--- Ready ---")
             lines.append(self.format_list(data["ready"], show_impact=True))
             lines.append("")
-
-        bs = data["blocked_summary"]
-        if bs["count"]:
-            lines.append(f"--- Blocked: {bs['count']} issues ---")
-            if bs["top_blockers"]:
-                lines.append("Top blockers:")
-                for b in bs["top_blockers"]:
-                    lines.append(f"  {b['id']} (impact {b.get('impact', '?')}): {b['title']}")
+        bs = data.get("blocked_summary", {})
+        if bs.get("count"):
+            lines.append(f"--- Blocked: {bs['count']} ---")
+            for b in bs.get("top_blockers", []):
+                lines.append(f"  {b['id']} (impact {b.get('impact', '?')}): {b['title']}")
             lines.append("")
-
-        if data["recently_closed"]:
-            lines.append("--- Recently Closed ---")
-            for i in data["recently_closed"]:
-                lines.append(f"  {i['id']}: {i['title']}")
-            lines.append("")
-
-        if data["recently_created"]:
+        if data.get("recently_created"):
             lines.append("--- Recently Created ---")
             for i in data["recently_created"]:
                 lines.append(f"  {i['id']}: {i['title']}")
-
         return "\n".join(lines)
 
     def format_dep_tree(self, tree, issue_id, indent=0):
@@ -1485,8 +1510,9 @@ def build_parser():
 
     # prime
     sp = sub.add_parser("prime")
-    sp.add_argument("--limit", type=int, default=10)
-    sp.add_argument("--hours", type=int, default=24)
+    sp.add_argument("--assignee", help="Assign claimed issue to this agent name")
+    sp.add_argument("--poll", type=int, default=5, help="Seconds between polls when blocked")
+    sp.add_argument("--watch", action="store_true", help="Show dashboard only, do not claim")
 
     # batch
     sub.add_parser("batch")
@@ -1689,8 +1715,9 @@ def _dispatch(args, tile, json_mode, fmt):
 
     elif cmd == "prime":
         result = tile.prime(
-            limit=getattr(args, "limit", 10),
-            hours=getattr(args, "hours", 24),
+            assignee=getattr(args, "assignee", None),
+            poll_interval=getattr(args, "poll", 5),
+            watch=getattr(args, "watch", False),
         )
         _output(result, json_mode, lambda: fmt.format_prime(result))
         return 0
